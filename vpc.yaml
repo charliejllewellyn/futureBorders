@@ -1,0 +1,1690 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+  vpcCidrBlock:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: Project name that will be used to name and identify resoures that are created
+  enableInternet:
+    Type: String
+    Default: true
+    Description: set to true to deploy an IGW and two public subnets
+    AllowedValues: [true, false]
+  enableNat:
+    Type: String
+    Default: false
+    Description: set to true to deploy a NAT GW
+    AllowedValues: [true, false]
+  enableVpcFlowLogs:
+    Type: String
+    Default: true
+    Description: set to true to configure VPC flow logs
+    AllowedValues: [true, false]
+  projectName:
+    Type: String
+    Default: futureborders
+    Description: VPC with public private subnets and optional NAT GW
+
+Mappings: 
+  RegionMap: 
+    eu-west-2:
+      AMI: "ami-0089b31e09ac3fffc"
+
+Conditions: 
+  CreateNat: !Equals [ !Ref enableNat, true ]
+  CreateIgw: !Or [ !Equals [ !Ref enableInternet, true ], Condition: CreateNat ]
+  CreateFlowLogs: !Equals [ !Ref enableVpcFlowLogs, true ]
+
+Resources:
+
+  vpc:
+    Type: "AWS::EC2::VPC"
+    Properties: 
+      CidrBlock: !Ref vpcCidrBlock
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        -
+          Key: Name
+          Value: !Ref projectName
+
+  publicSubnetA:
+    Type: AWS::EC2::Subnet
+    Condition: CreateIgw
+    Properties:
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref vpc
+      CidrBlock: !Select [0, !Cidr [!Ref vpcCidrBlock, 6, 5]]
+      AvailabilityZone: !Join [ "", [ !Ref "AWS::Region", a ] ]
+      Tags:
+        -
+          Key: Name
+          Value: !Join [ "", [ !Ref projectName, "-", "public-", a ] ]
+
+  publicSubnetB:
+    Type: AWS::EC2::Subnet
+    Condition: CreateIgw
+    Properties:
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref vpc
+      CidrBlock: !Select [1, !Cidr [!Ref vpcCidrBlock, 6, 5]]
+      AvailabilityZone: !Join [ "", [ !Ref "AWS::Region", b ] ]
+      Tags:
+        -
+          Key: Name
+          Value: !Join [ "", [ !Ref projectName, "-", "public-", b ] ]
+
+  privateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref vpc
+      CidrBlock: !Select [2, !Cidr [!Ref vpcCidrBlock, 6, 5]]
+      AvailabilityZone: !Join [ "", [ !Ref "AWS::Region", a ] ]
+      Tags:
+        -
+          Key: Name
+          Value: !Join [ "", [ !Ref projectName, "-", "private-", a ] ]
+
+  privateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref vpc
+      CidrBlock: !Select [3, !Cidr [!Ref vpcCidrBlock, 6, 5]]
+      AvailabilityZone: !Join [ "", [ !Ref "AWS::Region", b ] ]
+      Tags:
+        -
+          Key: Name
+          Value: !Join [ "", [ !Ref projectName, "-", "private-", b ] ]
+
+  internetGateway:
+    Type: "AWS::EC2::InternetGateway"
+    Condition: CreateIgw
+    Properties:
+      Tags:
+        -
+          Key: Name
+          Value: !Ref projectName
+
+  attachIgwVpc:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Condition: CreateIgw
+    Properties: 
+      InternetGatewayId: !Ref internetGateway
+      VpcId: !Ref vpc
+
+  publicRouteTable:
+    Type: "AWS::EC2::RouteTable"
+    Condition: CreateIgw
+    Properties: 
+      VpcId: !Ref vpc
+      Tags:
+        -
+          Key: Name
+          Value: !Join [ "", [ !Ref projectName, "-", "public" ] ]
+
+  route:
+    Type: "AWS::EC2::Route"
+    Condition: CreateIgw
+    Properties: 
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref internetGateway
+      RouteTableId: !Ref publicRouteTable
+
+  subnetAssA:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Condition: CreateIgw
+    Properties:
+      RouteTableId: !Ref publicRouteTable
+      SubnetId: !Ref publicSubnetA
+
+  subnetAssB:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Condition: CreateIgw
+    Properties:
+      RouteTableId: !Ref publicRouteTable
+      SubnetId: !Ref publicSubnetB
+
+  vpcFlowLogRole:
+    Type: "AWS::IAM::Role"
+    Condition: CreateFlowLogs
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - 
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "vpc-flow-logs.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+
+  vpcFlowLogPolicy:
+    Type: "AWS::IAM::Policy"
+    Condition: CreateFlowLogs
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - logs:CreateLogGroup
+          - logs:CreateLogStream
+          - logs:PutLogEvents
+          - logs:DescribeLogGroups
+          - logs:DescribeLogStreams
+          Resource:
+          - arn:aws:logs:*:*:*
+      PolicyName: vpcFlowLogPolicy
+      Roles:
+      - !Ref vpcFlowLogRole
+
+  vpcFlowLog:
+    Type: "AWS::EC2::FlowLog"
+    Condition: CreateFlowLogs
+    Properties:
+      DeliverLogsPermissionArn : !GetAtt vpcFlowLogRole.Arn
+      LogGroupName : securityGroupVpcFlowLogs
+      ResourceId : !Ref vpc
+      ResourceType : VPC
+      TrafficType : ALL
+
+  NAT:
+    Type: AWS::EC2::NatGateway
+    Condition: CreateNat
+    Properties:
+      AllocationId:
+        Fn::GetAtt:
+        - EIP
+        - AllocationId
+      SubnetId:
+        Ref: publicSubnetA
+      Tags:
+      - Key: Name
+        Value: !Ref projectName
+
+  EIP:
+    DependsOn: attachIgwVpc
+    Type: AWS::EC2::EIP
+    Condition: CreateNat
+    Properties:
+      Domain: vpc
+
+  privateRouteTable:
+    Type: "AWS::EC2::RouteTable"
+    Condition: CreateNat
+    Properties:
+      VpcId: !Ref vpc
+      Tags:
+        -
+          Key: Name
+          Value: !Join [ "", [ !Ref projectName, "-", "private" ] ]
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Condition: CreateNat
+    Properties:
+      RouteTableId:
+        Ref: privateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId:
+        Ref: NAT
+
+  PrivateSubnetAssA:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Condition: CreateNat
+    Properties:
+      RouteTableId: !Ref privateRouteTable
+      SubnetId: !Ref privateSubnetA
+
+  PrivateSubnetAssB:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Condition: CreateNat
+    Properties:
+      RouteTableId: !Ref privateRouteTable
+      SubnetId: !Ref privateSubnetB
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+
+  parquetS3Bucket:
+    Type: AWS::S3::Bucket
+
+  Ec2SSMInstanceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+
+  Ec2SSMInstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref Ec2SSMInstanceRole
+
+  LoaderInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: 
+        Fn::FindInMap: 
+          - "RegionMap"
+          - Ref: "AWS::Region"
+          - "AMI"
+      InstanceType: t3.large
+      BlockDeviceMappings: 
+      - DeviceName: "/dev/xvda"
+        Ebs: 
+          VolumeSize: "500"
+      SubnetId: !Ref publicSubnetA
+      IamInstanceProfile: !Ref Ec2SSMInstanceProfile
+      Tags:
+        - Key: Name
+          Value: futureborder-loader
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          echo 'SignalURL=${waitHandle}' > /tmp/waiturl.txt
+          echo '{
+             "Status" : "SUCCESS",
+             "Reason" : "Configuration Complete",
+             "UniqueId" : "ID1234",
+             "Data" : "Application has completed configuration."
+          }' > /tmp/wait.json
+          for i in {4..8}; do
+             echo "fetching Enigma_ams_201$i.zip..."
+             mkdir 201$i
+             curl https://paas-s3-broker-prod-lon-28dfee9f-1f43-42e3-b04c-b4897a97b93d.s3.amazonaws.com/Enigma_ams_201$i.zip -o 201$i/Enigma_ams_201$i.zip -s &
+          done
+          wait
+          for i in {4..8}; do
+            echo "unzipping Enigma_ams_201$i.zip..."
+            unzip -q 201$i/Enigma_ams_201$i.zip -d 201$i/ &
+          done
+          wait
+          for i in {4..8}; do
+            echo "uploading Enigma_ams_201$i.zip to S3..."
+            for file in $(find 201$i/ -name '*.csv' ! -path '*__MACOSX*' -exec  echo {} \;); do
+              aws s3 cp $file s3://${S3Bucket}/201$i/
+            done
+          done
+          wait
+          aws glue start-crawler --name futureborderscrawler --region eu-west-2
+          echo completed
+          curl -T /tmp/wait.json '${waitHandle}'
+          
+  glueRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "glue.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+
+  GlueDB:
+    Type: AWS::Glue::Database
+    Properties: 
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput: 
+        Name: futureborders
+
+  GlueCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Role: !Ref glueRole
+      Description: example classifier
+      DatabaseName: !Ref GlueDB
+      Name: futureborderscrawler
+      Targets:
+        S3Targets:
+        - Path: !Ref S3Bucket
+
+  waitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    Properties: {}
+
+  waitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: LoaderInstance
+    Properties:
+      Handle: !Ref waitHandle
+      Timeout: '4500'
+
+  jobamsbillgen201920191209031csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsbillgen201920191209031csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "ams__billgen_2019__2019_12_09__0_3_1_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamscargodesc201920191209031csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamscargodesc201920191209031csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "ams__cargodesc_2019__2019_12_09__0_3_1_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsconsignee201920191209031csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsconsignee201920191209031csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "ams__consignee_2019__2019_12_09__0_3_1_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamscontainer201920191209031csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamscontainer201920191209031csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "ams__container_2019__2019_12_09__0_3_1_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamshazmat201920191209031csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamshazmat201920191209031csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "ams__hazmat_2019__2019_12_09__0_3_1_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamshazmatclass201920191209031csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamshazmatclass201920191209031csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "ams__hazmatclass_2019__2019_12_09__0_3_1_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsheader201920191209031csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsheader201920191209031csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "ams__header_2019__2019_12_09__0_3_1_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsmarksnumbers201920191209031csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsmarksnumbers201920191209031csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "ams__marksnumbers_2019__2019_12_09__0_3_1_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsnotifyparty201920191209031csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsnotifyparty201920191209031csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "ams__notifyparty_2019__2019_12_09__0_3_1_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsshipper201920191209031csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsshipper201920191209031csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "ams__shipper_2019__2019_12_09__0_3_1_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamstariff201920191209031csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamstariff201920191209031csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "ams__tariff_2019__2019_12_09__0_3_1_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsbillofladingheaders2014csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amsbillofladingheaders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsbillofladingheaders2014csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsbillofladingheaders_2014_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsbillofladingheaders2015csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amsbillofladingheaders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsbillofladingheaders2015csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsbillofladingheaders_2015_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsbillofladingheaders2016csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amsbillofladingheaders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsbillofladingheaders2016csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsbillofladingheaders_2016_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsbillofladingheaders2017csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amsbillofladingheaders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsbillofladingheaders2017csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsbillofladingheaders_2017_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamscargodescriptions2014csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amscargodescriptions"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamscargodescriptions2014csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amscargodescriptions_2014_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamscargodescriptions2015csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amscargodescriptions"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamscargodescriptions2015csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amscargodescriptions_2015_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamscargodescriptions2016csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amscargodescriptions"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamscargodescriptions2016csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amscargodescriptions_2016_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamscargodescriptions2017csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amscargodescriptions"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamscargodescriptions2017csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amscargodescriptions_2017_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamscontainers2014csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amscontainers"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamscontainers2014csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amscontainers_2014_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamscontainers2015csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amscontainers"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamscontainers2015csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amscontainers_2015_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamscontainers2016csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amscontainers"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamscontainers2016csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amscontainers_2016_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamscontainers2017csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amscontainers"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamscontainers2017csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amscontainers_2017_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsgeneralbillinformation2014csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amsgeneralbillinformation"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsgeneralbillinformation2014csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsgeneralbillinformation_2014_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsgeneralbillinformation2015csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amsgeneralbillinformation"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsgeneralbillinformation2015csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsgeneralbillinformation_2015_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsgeneralbillinformation2016csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amsgeneralbillinformation"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsgeneralbillinformation2016csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsgeneralbillinformation_2016_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsgeneralbillinformation2017csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amsgeneralbillinformation"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsgeneralbillinformation2017csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsgeneralbillinformation_2017_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamshazardousmaterialclassification2014csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amshazardousmaterialclassification"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamshazardousmaterialclassification2014csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amshazardousmaterialclassification_2014_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamshazardousmaterialclassification2015csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amshazardousmaterialclassification"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamshazardousmaterialclassification2015csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amshazardousmaterialclassification_2015_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamshazardousmaterialclassification2016csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amshazardousmaterialclassification"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamshazardousmaterialclassification2016csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amshazardousmaterialclassification_2016_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamshazardousmaterialclassification2017csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amshazardousmaterialclassification"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamshazardousmaterialclassification2017csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amshazardousmaterialclassification_2017_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamshazardousmaterialdetails2014csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amshazardousmaterialdetails"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamshazardousmaterialdetails2014csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amshazardousmaterialdetails_2014_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamshazardousmaterialdetails2015csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amshazardousmaterialdetails"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamshazardousmaterialdetails2015csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amshazardousmaterialdetails_2015_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamshazardousmaterialdetails2016csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amshazardousmaterialdetails"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamshazardousmaterialdetails2016csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amshazardousmaterialdetails_2016_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamshazardousmaterialdetails2017csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-008369042577-eu-west-2/admin/amshazardousmaterialdetails"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamshazardousmaterialdetails2017csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amshazardousmaterialdetails_2017_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsmarksnumbers2014csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsmarksnumbers2014csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsmarksnumbers_2014_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsmarksnumbers2015csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsmarksnumbers2015csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsmarksnumbers_2015_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsmarksnumbers2016csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsmarksnumbers2016csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsmarksnumbers_2016_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsmarksnumbers2017csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsmarksnumbers2017csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsmarksnumbers_2017_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsnotifiedparties2014csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsnotifiedparties2014csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsnotifiedparties_2014_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsnotifiedparties2015csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsnotifiedparties2015csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsnotifiedparties_2015_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsnotifiedparties2016csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsnotifiedparties2016csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsnotifiedparties_2016_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsnotifiedparties2017csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsnotifiedparties2017csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsnotifiedparties_2017_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsshipmentconsignees2014csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsshipmentconsignees2014csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsshipmentconsignees_2014_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsshipmentconsignees2015csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsshipmentconsignees2015csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsshipmentconsignees_2015_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsshipmentconsignees2016csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsshipmentconsignees2016csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsshipmentconsignees_2016_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsshipmentconsignees2017csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsshipmentconsignees2017csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsshipmentconsignees_2017_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsshippers2014csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsshippers2014csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsshippers_2014_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsshippers2015csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsshippers2015csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsshippers_2015_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsshippers2016csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsshippers2016csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsshippers_2016_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamsshippers2017csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamsshippers2017csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amsshippers_2017_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamstariffs2014csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamstariffs2014csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amstariffs_2014_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamstariffs2015csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamstariffs2015csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amstariffs_2015_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamstariffs2016csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamstariffs2016csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amstariffs_2016_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+  jobamstariffs2017csv:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://aws-glue-scripts-${AWS::AccountId}-eu-west-2/admin/futureborders"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Name: futurebordersamstariffs2017csv
+      Role: !Ref glueRole
+      GlueVersion: "1.0"
+      DefaultArguments:
+        "--table_name": "amstariffs_2017_csv"
+        "--TempDir": "s3://aws-glue-temporary-008369042577-eu-west-2/admin"
+        "--enable-metrics": ""
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+
+  glueWorkflow:
+    Type: AWS::Glue::Workflow
+    Properties: 
+      Name: futureborders2
+
+  OnDemandJobTrigger1:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Type: ON_DEMAND
+      Name: GlueTrigger1
+      WorkflowName: !Ref glueWorkflow
+      Actions:
+        - JobName: futurebordersamshazardousmaterialclassification2016csv
+        - JobName: futurebordersamshazardousmaterialclassification2015csv
+        - JobName: futurebordersamshazardousmaterialclassification2014csv
+        - JobName: futurebordersamsgeneralbillinformation2017csv
+        - JobName: futurebordersamsgeneralbillinformation2016csv
+        - JobName: futurebordersamsgeneralbillinformation2015csv
+        - JobName: futurebordersamsgeneralbillinformation2014csv
+        - JobName: futurebordersamscontainers2017csv
+        - JobName: futurebordersamscontainers2016csv
+        - JobName: futurebordersamscontainers2015csv
+        - JobName: futurebordersamscontainers2014csv
+        - JobName: futurebordersamscargodescriptions2017csv
+        - JobName: futurebordersamscargodescriptions2016csv
+        - JobName: futurebordersamscargodescriptions2015csv
+        - JobName: futurebordersamscargodescriptions2014csv
+        - JobName: futurebordersamsbillofladingheaders2017csv
+        - JobName: futurebordersamsbillofladingheaders2016csv
+        - JobName: futurebordersamsbillofladingheaders2015csv
+        - JobName: futurebordersamsbillofladingheaders2014csv
+        - JobName: futurebordersamstariff201920191209031csv
+        - JobName: futurebordersamsshipper201920191209031csv
+        - JobName: futurebordersamsnotifyparty201920191209031csv
+        - JobName: futurebordersamsmarksnumbers201920191209031csv
+        - JobName: futurebordersamsheader201920191209031csv
+        - JobName: futurebordersamshazmatclass201920191209031csv
+        - JobName: futurebordersamshazmat201920191209031csv
+        - JobName: futurebordersamscontainer201920191209031csv
+        - JobName: futurebordersamsconsignee201920191209031csv
+        - JobName: futurebordersamscargodesc201920191209031csv
+        - JobName: futurebordersamsbillgen201920191209031csv
+
+  GlueTrigger2:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Type: CONDITIONAL
+      Name: GlueTrigger2
+      WorkflowName: !Ref glueWorkflow
+      Actions:
+        - JobName: futurebordersamstariffs2017csv
+        - JobName: futurebordersamstariffs2016csv
+        - JobName: futurebordersamstariffs2015csv
+        - JobName: futurebordersamstariffs2014csv
+        - JobName: futurebordersamsshippers2017csv
+        - JobName: futurebordersamsshippers2016csv
+        - JobName: futurebordersamsshippers2015csv
+        - JobName: futurebordersamsshippers2014csv
+        - JobName: futurebordersamsshipmentconsignees2017csv
+        - JobName: futurebordersamsshipmentconsignees2016csv
+        - JobName: futurebordersamsshipmentconsignees2015csv
+        - JobName: futurebordersamsshipmentconsignees2014csv
+        - JobName: futurebordersamsnotifiedparties2017csv
+        - JobName: futurebordersamsnotifiedparties2016csv
+        - JobName: futurebordersamsnotifiedparties2015csv
+        - JobName: futurebordersamsnotifiedparties2014csv
+        - JobName: futurebordersamsmarksnumbers2017csv
+        - JobName: futurebordersamsmarksnumbers2016csv
+        - JobName: futurebordersamsmarksnumbers2015csv
+        - JobName: futurebordersamsmarksnumbers2014csv
+        - JobName: futurebordersamshazardousmaterialdetails2017csv
+        - JobName: futurebordersamshazardousmaterialdetails2016csv
+        - JobName: futurebordersamshazardousmaterialdetails2015csv
+        - JobName: futurebordersamshazardousmaterialdetails2014csv
+        - JobName: futurebordersamshazardousmaterialclassification2017csv
+      Predicate:
+        Logical: AND
+        Conditions:
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamshazardousmaterialclassification2016csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamshazardousmaterialclassification2015csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamshazardousmaterialclassification2014csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamsgeneralbillinformation2017csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamsgeneralbillinformation2016csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamsgeneralbillinformation2015csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamsgeneralbillinformation2014csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamscontainers2017csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamscontainers2016csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamscontainers2015csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamscontainers2014csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamscargodescriptions2017csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamscargodescriptions2016csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamscargodescriptions2015csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamscargodescriptions2014csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamsbillofladingheaders2017csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamsbillofladingheaders2016csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamsbillofladingheaders2015csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamsbillofladingheaders2014csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamstariff201920191209031csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamsshipper201920191209031csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamsnotifyparty201920191209031csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamsmarksnumbers201920191209031csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamsheader201920191209031csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamshazmatclass201920191209031csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamshazmat201920191209031csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamscontainer201920191209031csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamsconsignee201920191209031csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamscargodesc201920191209031csv
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: futurebordersamsbillgen201920191209031csv
+            State: SUCCEEDED
+
+          #
+          #            #  GlueTrigger3:
+          #            #    Type: AWS::Glue::Trigger
+          #            #    Properties:
+          #            #      Name: futureborderstrigger3
+          #            #      WorkflowName: !Ref glueWorkflow
+          #            #      Type: CONDITIONAL
+          #            #      Actions:
+          #            #        - CrawlerName: !Ref GlueParquetCrawler
+          #            #      Predicate:
+          #            #        Logical: AND
+          #            #        Conditions:
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amshazmat201920191209031csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amscontainer201920191209031csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amsconsignee201920191209031csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amscargodesc201920191209031csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amsbillgen201920191209031csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amscontainers2017csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amscontainers2016csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amscontainers2015csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amscontainers2014csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amscargodescriptions2017csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amscargodescriptions2016csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amscargodescriptions2015csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amscargodescriptions2014csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amsbillofladingheaders2017csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amsbillofladingheaders2016csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amsbillofladingheaders2015csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amsbillofladingheaders2014csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amstariff201920191209031csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amsshipper201920191209031csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amsnotifyparty201920191209031csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amsmarksnumbers201920191209031csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amsheader201920191209031csv
+          #            #          State: SUCCEEDED
+          #            #        - LogicalOperator: EQUALS  
+          #            #          JobName: amshazmatclass201920191209031csv
+          #            #          State: SUCCEEDED
+
+  GlueDBParquet:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: futurebordersparquet
+
+  GlueParquetCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Role: !Ref glueRole
+      Description: example classifier
+      DatabaseName: !Ref GlueDBParquet
+      Name: futureborderscrawlerparquet
+      Targets:
+        S3Targets:
+        - Path: !Ref parquetS3Bucket
