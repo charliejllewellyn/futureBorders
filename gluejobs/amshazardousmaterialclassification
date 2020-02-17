@@ -1,0 +1,44 @@
+import sys
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+import re
+
+## @params: [JOB_NAME]
+args = getResolvedOptions(sys.argv, ['JOB_NAME', 'table_name'])
+
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+newTable=re.search('([^0-9]+)\d+', re.sub('_', '', args['table_name']), re.M|re.I)
+objectYear = re.search( r'[^-0-9\/]+(\d+)', args['table_name'], re.M|re.I)
+## @type: DataSource
+## @args: [database = "futureborders", table_name = args['table_name'], transformation_ctx = "datasource0"]
+## @return: datasource0
+## @inputs: []
+datasource0 = glueContext.create_dynamic_frame.from_catalog(database = "futureborders", table_name = args['table_name'], transformation_ctx = "datasource0")
+## @type: ApplyMapping
+## @args: [mapping = [("identifier", "long", "identifier", "long"), ("container_number", "string", "container_number", "string"), ("hazmat_sequence_number", "long", "hazmat_sequence_number", "long"), ("hazmat_classification", "string", "hazmat_classification", "string")], transformation_ctx = "applymapping1"]
+## @return: applymapping1
+## @inputs: [frame = datasource0]
+applymapping1 = ApplyMapping.apply(frame = datasource0, mappings = [("identifier", "long", "identifier", "long"), ("container_number", "string", "container_number", "string"), ("hazmat_sequence_number", "long", "hazmat_sequence_number", "long"), ("hazmat_classification", "string", "hazmat_classification", "string")], transformation_ctx = "applymapping1")
+## @type: ResolveChoice
+## @args: [choice = "make_struct", transformation_ctx = "resolvechoice2"]
+## @return: resolvechoice2
+## @inputs: [frame = applymapping1]
+resolvechoice2 = ResolveChoice.apply(frame = applymapping1, choice = "make_struct", transformation_ctx = "resolvechoice2")
+## @type: DropNullFields
+## @args: [transformation_ctx = "dropnullfields3"]
+## @return: dropnullfields3
+## @inputs: [frame = resolvechoice2]
+dropnullfields3 = DropNullFields.apply(frame = resolvechoice2, transformation_ctx = "dropnullfields3")
+## @type: DataSink
+## @args: [connection_type = "s3", connection_options = {"path": "s3://S3_BUCKET/" + newTable.group(1) + "/year=" + objectYear.group(1)}, format = "parquet", transformation_ctx = "datasink4"]
+## @return: datasink4
+## @inputs: [frame = dropnullfields3]
+datasink4 = glueContext.write_dynamic_frame.from_options(frame = dropnullfields3, connection_type = "s3", connection_options = {"path": "s3://S3_BUCKET/" + newTable.group(1) + "/year=" + objectYear.group(1)}, format = "parquet", transformation_ctx = "datasink4")
+job.commit()
